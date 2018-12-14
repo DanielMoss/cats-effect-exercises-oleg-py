@@ -26,10 +26,35 @@ object Attempt extends IOApp {
   }
 
   // Use this class for reporting all failures.
-  final case class CompositeException(ex: NonEmptyList[Throwable]) extends Exception("All race candidates have failed")
+  final case class CompositeException(ex: NonEmptyList[Throwable]) extends Exception("All race candidates have failed") {
+    override def getMessage: String =
+      s"${super.getMessage}: ${ex.map(_.getMessage)}"
+
+    def :+(t: Throwable): CompositeException = copy(ex = ex :+ t)
+  }
 
   // And implement this function:
-  def raceToSuccess[A](ios: NonEmptyList[IO[A]]): IO[A] = ???
+  def raceToSuccess[A](ios: NonEmptyList[IO[A]]): IO[A] = {
+    val head = ios.head.redeem(
+      t => Left(CompositeException(NonEmptyList.one(t))),
+      a => Right(a)
+    )
+
+    val raceResult = ios.tail.foldLeft(head) { (acc, proc) =>
+      IO.racePair(acc, proc.attempt).flatMap {
+        case Left((Left(comp), procFib)) => procFib.join.map(_.leftMap(comp :+ _))
+        case Right((accFib, Left(t)))    => accFib.join.map(_.leftMap(_ :+ t))
+
+        case Left((Right(a), procFib)) => procFib.cancel.map(_ => Right(a))
+        case Right((accFib, Right(a))) => accFib.cancel.map(_ => Right(a))
+      }
+    }
+
+    raceResult.map {
+      case Left(comp) => throw comp
+      case Right(a)   => a
+    }
+  }
 
   // In your IOApp, you can use the following sample method list
   val methods: NonEmptyList[IO[Data]] = NonEmptyList.of(
