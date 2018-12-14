@@ -1,7 +1,8 @@
 package workerpool
 
-import cats.effect.concurrent.{MVar, Ref}
 import cats.effect._
+import cats.effect.concurrent.{MVar, Ref}
+import cats.effect.implicits._
 import cats.implicits._
 
 import scala.concurrent.duration._
@@ -51,7 +52,7 @@ object Attempt extends IOApp {
     /** [[MVar.put]], but we do not wait for the operation to complete */
     private def asyncPut[F[_], T](mVar: MVar[F, T], t: T)
                                  (implicit F: Concurrent[F]): F[Unit] =
-      F.start(mVar.put(t)) >> F.pure(())
+      mVar.put(t).start >> F.pure(())
 
     /** [[asyncPut]], but we queue up all elements of the list into the MVar */
     private def asyncPutAll[F[_] : Concurrent, T](initialMVar: F[MVar[F, T]], ts: List[T]): F[MVar[F, T]] =
@@ -70,7 +71,7 @@ object Attempt extends IOApp {
           acquireWorker.flatMap(worker =>
             for {
               result <- worker.apply(a)
-              _      <- F.start(release(worker))
+              _      <- release(worker).start
             } yield result
           )
 

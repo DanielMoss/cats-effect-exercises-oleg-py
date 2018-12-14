@@ -2,6 +2,7 @@ package race
 
 import cats.data._
 import cats.effect._
+import cats.effect.implicits._
 import cats.implicits._
 import cats.{Functor, Reducible}
 
@@ -21,7 +22,7 @@ object Attempt extends IOApp {
       txt <- F.delay(Random.alphanumeric.take(16).mkString)
     } yield Data(name, txt)
 
-    F.guaranteeCase(proc) {
+    proc.guaranteeCase {
       case ExitCase.Completed => F.delay(println(s"$name request finished"))
       case ExitCase.Canceled  => F.delay(println(s"$name request canceled"))
       case ExitCase.Error(_)  => F.delay(println(s"$name errored"))
@@ -47,7 +48,7 @@ object Attempt extends IOApp {
   // And implement this function:
   def raceToSuccess[F[_], T[_] : Reducible, A](fs: T[F[A]])
                                               (implicit F: Concurrent[F]): F[A] =
-    fs.reduce { (f1, f2) =>
+    fs.reduce((f1, f2) =>
       F.racePair(f1.attempt, f2.attempt).flatMap {
         case Left((Left(t), f2Fib))  => composeErrorsAndContinue(t, f2Fib)
         case Right((f1Fib, Left(t))) => composeErrorsAndContinue(t, f1Fib)
@@ -55,7 +56,7 @@ object Attempt extends IOApp {
         case Left((Right(a), f2Fib))  => cancelAndReturnResult(a, f2Fib)
         case Right((f1Fib, Right(a))) => cancelAndReturnResult(a, f1Fib)
       }
-    }
+    )
 
   private def composeErrorsAndContinue[F[_] : Functor, A](t: Throwable, fiber: Fiber[F, Either[Throwable, A]]): F[A] =
     fiber.join.map {
