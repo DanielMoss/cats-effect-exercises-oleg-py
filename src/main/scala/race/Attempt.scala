@@ -3,6 +3,7 @@ package race
 import cats.data._
 import cats.effect._
 import cats.implicits._
+import cats.{Functor, Reducible}
 
 import scala.concurrent.duration._
 import scala.language.higherKinds
@@ -31,42 +32,47 @@ object Attempt extends IOApp {
   final case class CompositeException(ex: NonEmptyList[Throwable]) extends Exception("All race candidates have failed") {
     override def getMessage: String =
       s"${super.getMessage}: ${ex.map(_.getMessage)}"
+  }
 
-    def :+(t: Throwable): CompositeException = copy(ex = ex :+ t)
+  object CompositeException {
+    def apply(t1: Throwable, t2: Throwable): CompositeException =
+      (t1, t2) match {
+        case (CompositeException(l1), CompositeException(l2)) => CompositeException(l1 combine l2)
+        case (CompositeException(l),  _)                      => CompositeException(l :+ t2)
+        case (_,                      CompositeException(l))  => CompositeException(l :+ t1)
+        case (_,                      _)                      => CompositeException(NonEmptyList.of(t1, t2))
+      }
   }
 
   // And implement this function:
-  def raceToSuccess[F[_], A](fs: NonEmptyList[F[A]])
-                            (implicit F: Concurrent[F]): F[A] = {
-    val head = fs.head.attempt.map {
-      case Left(t)  => Left(CompositeException(NonEmptyList.one(t)))
-      case Right(a) => Right(a)
-    }
+  def raceToSuccess[F[_], T[_] : Reducible, A](fs: T[F[A]])
+                                              (implicit F: Concurrent[F]): F[A] =
+    fs.reduce { (f1, f2) =>
+      F.racePair(f1.attempt, f2.attempt).flatMap {
+        case Left((Left(t), f2Fib))  => composeErrorsAndContinue(t, f2Fib)
+        case Right((f1Fib, Left(t))) => composeErrorsAndContinue(t, f1Fib)
 
-    val raceResult = fs.tail.foldLeft(head) { (acc, proc) =>
-      F.racePair(acc, proc.attempt).flatMap {
-        case Left((Left(comp), procFib)) => procFib.join.map(_.leftMap(comp :+ _))
-        case Right((accFib, Left(t)))    => accFib.join.map(_.leftMap(_ :+ t))
-
-        case Left((Right(a), procFib)) => cancel(procFib).map(_ => Right(a))
-        case Right((accFib, Right(a))) => cancel(accFib).map(_ => Right(a))
+        case Left((Right(a), f2Fib))  => cancelAndReturnResult(a, f2Fib)
+        case Right((f1Fib, Right(a))) => cancelAndReturnResult(a, f1Fib)
       }
     }
 
-    raceResult.map {
-      case Left(comp) => throw comp
-      case Right(a)   => a
+  private def composeErrorsAndContinue[F[_] : Functor, A](t: Throwable, fiber: Fiber[F, Either[Throwable, A]]): F[A] =
+    fiber.join.map {
+      case Left(t2) => throw CompositeException(t, t2)
+      case Right(a) => a
     }
+
+  private def cancelAndReturnResult[F[_] : Functor, A](result: A, fiber: Fiber[F, _]): F[A] = {
+    // fiber.cancel returns a CancelToken[F], which is an alias for F[Unit].
+    // IntelliJ doesn't cope well resolving type classes for this alias, so
+    // this method exists to "unalias" the cancel method.
+    val cancelledFiber: F[Unit] = fiber.cancel
+    cancelledFiber.map(_ => result)
   }
 
-  /** fiber.cancel returns a CancelToken[F], which is an alias for F[Unit].
-    * IntelliJ doesn't cope well resolving type classes for this alias, so
-    * this method exists to "unalias" the cancel method.
-    */
-  private def cancel[F[_]](fiber: Fiber[F, _]): F[Unit] = fiber.cancel
-
   // In your IOApp, you can use the following sample method list
-  def methods[F[_] : Sync : Timer]: NonEmptyList[F[Data]] = NonEmptyList.of(
+  def methods[F[_] : Sync : Timer]: NonEmptyVector[F[Data]] = NonEmptyVector.of(
     "memcached",
     "redis",
     "postgres",
