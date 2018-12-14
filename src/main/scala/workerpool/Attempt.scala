@@ -16,7 +16,7 @@ object Attempt extends IOApp {
 
   // Sample stateful worker that keeps count of requests it has accepted
   def mkWorker[F[_]](id: Int)
-                    (implicit timer: Timer[F], F: Concurrent[F]): F[Worker[F, Int, Int]] =
+                    (implicit timer: Timer[F], F: Sync[F]): F[Worker[F, Int, Int]] =
     Ref[F].of(0).map { counter =>
       def simulateWork: F[Unit] =
         F.delay(50 + Random.nextInt(450)).map(_.millis).flatMap(timer.sleep)
