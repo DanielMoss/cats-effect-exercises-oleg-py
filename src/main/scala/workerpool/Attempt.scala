@@ -44,9 +44,10 @@ object Attempt extends IOApp {
     final class OfPartiallyApplied[F[_]](val dummy: Boolean = true) extends AnyVal {
       def apply[A, B](fs: List[Worker[F, A, B]])(implicit F: Concurrent[F]): F[WorkerPool[F, A, B]] =
         for {
-          nextWorker     <- asyncPutAll[F, Worker[F, A, B]](MVar[F].empty, fs)
-          currentWorkers <- Ref[F].of(fs)
-        } yield poolImpl[F, A, B](currentWorkers, nextWorker)
+          nextWorkerStore     <- MVar.empty[F, Worker[F, A, B]]
+          _                   <- asyncPutAll(nextWorkerStore, fs)
+          currentWorkersStore <- Ref[F].of(fs)
+        } yield poolImpl[F, A, B](currentWorkersStore, nextWorkerStore)
     }
 
     /** [[MVar.put]], but we do not wait for the operation to complete */
@@ -55,43 +56,41 @@ object Attempt extends IOApp {
       mVar.put(t).start >> F.pure(())
 
     /** [[asyncPut]], but we queue up all elements of the list into the MVar */
-    private def asyncPutAll[F[_] : Concurrent, T](initialMVar: F[MVar[F, T]], ts: List[T]): F[MVar[F, T]] =
-      ts.foldLeft(initialMVar)((fMVar, t) =>
-        for {
-          mVar <- fMVar
-          _    <- asyncPut(mVar, t)
-        } yield mVar
+    private def asyncPutAll[F[_], T](mVar: MVar[F, T], ts: List[T])
+                                    (implicit F: Concurrent[F]): F[Unit] =
+      ts.foldLeft(F.pure(()))((acc, t) =>
+        acc >> asyncPut(mVar, t)
       )
 
-    private def poolImpl[F[_], A, B](currentWorkers: Ref[F, List[Worker[F, A, B]]],
-                                     nextWorker: MVar[F, Worker[F, A, B]])
+    private def poolImpl[F[_], A, B](currentWorkersStore: Ref[F, List[Worker[F, A, B]]],
+                                     nextWorkerStore: MVar[F, Worker[F, A, B]])
                                     (implicit F: Concurrent[F]): WorkerPool[F, A, B] =
       new WorkerPool[F, A, B] {
         def exec(a: A): F[B] =
-          acquireWorker.flatMap(worker =>
-            for {
-              result <- worker.apply(a)
-              _      <- release(worker).start
-            } yield result
-          )
+          for {
+            worker <- acquireWorker
+            result <- worker.apply(a)
+            _      <- release(worker).start
+          } yield result
 
         def add(worker: Worker[F, A, B]): F[Unit] =
-          currentWorkers.update(_ :+ worker) >> asyncPut(nextWorker, worker)
+          currentWorkersStore.update(_ :+ worker) >> asyncPut(nextWorkerStore, worker)
 
         def removeAllWorkers(): F[Unit] =
-          currentWorkers.set(List.empty)
+          currentWorkersStore.set(List.empty)
 
         private def acquireWorker: F[Worker[F, A, B]] =
           for {
-            maybeWorker <- nextWorker.take
-            workers     <- currentWorkers.get
-            worker      <- if (workers.contains(maybeWorker)) F.pure(maybeWorker) else acquireWorker
+            storedWorker   <- nextWorkerStore.take
+            currentWorkers <- currentWorkersStore.get
+            worker         <- if (currentWorkers.contains(storedWorker)) F.pure(storedWorker) else acquireWorker
           } yield worker
 
         private def release(worker: Worker[F, A, B]): F[Unit] =
-          currentWorkers.get.flatMap(workers =>
-            if (workers.contains(worker)) asyncPut(nextWorker, worker) else F.pure(())
-          )
+          for {
+            currentWorkers <- currentWorkersStore.get
+            _              <- if (currentWorkers.contains(worker)) asyncPut(nextWorkerStore, worker) else F.pure(())
+          } yield ()
       }
   }
 
